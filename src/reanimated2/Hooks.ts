@@ -17,7 +17,6 @@ import { initialUpdaterRun, cancelAnimation } from './animations';
 import { getTag } from './NativeMethods';
 import NativeReanimated from './NativeReanimated';
 import { Platform } from 'react-native';
-import { makeViewDescriptorsSet, makeViewsRefSet } from './ViewDescriptorsSet';
 import { processColor } from './Colors';
 
 export function useSharedValue(init) {
@@ -173,7 +172,7 @@ function isAnimated(prop) {
     }
     return false;
   }
-  return prop?.onFrame !== undefined;
+  return prop.onFrame !== undefined;
 }
 
 function styleDiff(oldStyle, newStyle) {
@@ -231,7 +230,7 @@ const validateAnimatedStyles = (styles) => {
 };
 
 function styleUpdater(
-  viewDescriptors,
+  viewDescriptor,
   updater,
   state,
   maybeViewRef,
@@ -281,7 +280,7 @@ function styleUpdater(
       }
 
       if (updates) {
-        updateProps(viewDescriptors, updates, maybeViewRef);
+        updateProps(viewDescriptor, updates, maybeViewRef);
       }
 
       if (!allFinished) {
@@ -304,17 +303,17 @@ function styleUpdater(
     state.last = Object.assign({}, oldValues, newValues);
     const style = getStyleWithoutAnimations(oldValues, newValues);
     if (style) {
-      updateProps(viewDescriptors, style, maybeViewRef);
+      updateProps(viewDescriptor, style, maybeViewRef);
     }
   } else {
     state.isAnimationCancelled = true;
     state.animations = {};
-    updateProps(viewDescriptors, newValues, maybeViewRef);
+    updateProps(viewDescriptor, newValues, maybeViewRef);
   }
 }
 
 function jestStyleUpdater(
-  viewDescriptors,
+  viewDescriptor,
   updater,
   state,
   maybeViewRef,
@@ -371,7 +370,7 @@ function jestStyleUpdater(
 
     if (Object.keys(updates).length) {
       updatePropsJestWrapper(
-        viewDescriptors,
+        viewDescriptor,
         updates,
         maybeViewRef,
         animatedStyle,
@@ -408,7 +407,7 @@ function jestStyleUpdater(
 
   if (Object.keys(diff).length !== 0) {
     updatePropsJestWrapper(
-      viewDescriptors,
+      viewDescriptor,
       diff,
       maybeViewRef,
       animatedStyle,
@@ -436,19 +435,17 @@ const parseColors = (updates) => {
 };
 
 const canApplyOptimalisation = (upadterFn) => {
-  const FUNCTIONLESS_FLAG = 0b00000001;
-  const STATEMENTLESS_FLAG = 0b00000010;
+  const FUNCTIONLESS_FLAG =   0b00000001;
+  const STATEMENTLESS_FLAG =  0b00000010;
   const optimalization = upadterFn.__optimalization;
-  return (
-    optimalization & FUNCTIONLESS_FLAG && optimalization & STATEMENTLESS_FLAG
-  );
+  return (optimalization & FUNCTIONLESS_FLAG) && (optimalization & STATEMENTLESS_FLAG);
 };
 
 export function useAnimatedStyle(updater, dependencies, adapters) {
+  const viewDescriptor = useSharedValue({ tag: -1, name: null }, false);
   const initRef = useRef(null);
-  const viewsRef = makeViewsRefSet();
-  const viewDescriptors = makeViewDescriptorsSet();
   const inputs = Object.values(updater._closure);
+  const viewRef = useRef(null);
   adapters = !adapters || Array.isArray(adapters) ? adapters : [adapters];
   const adaptersHash = adapters ? buildWorkletsHash(adapters) : null;
   const animationsActive = useSharedValue(true);
@@ -466,25 +463,17 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
   adaptersHash && dependencies.push(adaptersHash);
 
   if (initRef.current === null) {
-    const initialStyle = initialUpdaterRun(updater);
-    validateAnimatedStyles(initialStyle);
+    const initial = initialUpdaterRun(updater);
+    validateAnimatedStyles(initial);
     initRef.current = {
-      initial: {
-        value: null,
-      },
-      remoteState: makeRemote({ last: initialStyle }),
-      sharableViewDescriptors: makeMutable([]),
+      initial,
+      remoteState: makeRemote({ last: initial }),
     };
-    viewDescriptors.rebuildsharableViewDescriptors(
-      initRef.current.sharableViewDescriptors
-    );
   }
-  dependencies.push(initRef.current.sharableViewDescriptors.value);
 
-  const { initial, remoteState, sharableViewDescriptors } = initRef.current;
-  const maybeViewRef = NativeReanimated.native ? undefined : viewsRef;
+  const { remoteState, initial } = initRef.current;
+  const maybeViewRef = NativeReanimated.native ? undefined : viewRef;
 
-  initial.value = initialUpdaterRun(updater);
   useEffect(() => {
     let fun;
     let upadterFn = updater;
@@ -500,7 +489,7 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
       };
     }
 
-    if (canApplyOptimalisation(upadterFn) && Platform.OS !== 'web') {
+    if (canApplyOptimalisation(upadterFn)) {
       if (hasColorProps(upadterFn())) {
         upadterFn = () => {
           'worklet';
@@ -509,7 +498,7 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
           return style;
         };
       }
-    } else if (Platform.OS !== 'web') {
+    } else {
       optimalization = 0;
       upadterFn = () => {
         'worklet';
@@ -518,15 +507,13 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
         return style;
       };
     }
-    if (typeof updater.__optimalization !== undefined) {
-      upadterFn.__optimalization = optimalization;
-    }
+    upadterFn.__optimalization = optimalization;
 
     if (process.env.JEST_WORKER_ID) {
       fun = () => {
         'worklet';
         jestStyleUpdater(
-          sharableViewDescriptors,
+          viewDescriptor,
           updater,
           remoteState,
           maybeViewRef,
@@ -539,7 +526,7 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
       fun = () => {
         'worklet';
         styleUpdater(
-          sharableViewDescriptors,
+          viewDescriptor,
           upadterFn,
           remoteState,
           maybeViewRef,
@@ -547,13 +534,13 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
         );
       };
     }
-
     const mapperId = startMapper(
       fun,
       inputs,
       [],
       upadterFn,
-      sharableViewDescriptors
+      viewDescriptor.value.tag,
+      viewDescriptor.value.name || 'RCTView'
     );
     return () => {
       stopMapper(mapperId);
@@ -563,8 +550,8 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
   useEffect(() => {
     animationsActive.value = true;
     return () => {
-      // initRef.current = null;
-      // viewsRef = null;
+      initRef.current = null;
+      viewRef.current = null;
       animationsActive.value = false;
     };
   }, []);
@@ -606,9 +593,9 @@ export function useAnimatedStyle(updater, dependencies, adapters) {
   }
 
   if (process.env.JEST_WORKER_ID) {
-    return { viewDescriptors, initial, viewsRef, animatedStyle };
+    return { viewDescriptor, initial, viewRef, animatedStyle };
   } else {
-    return { viewDescriptors, initial, viewsRef };
+    return { viewDescriptor, initial, viewRef };
   }
 }
 
